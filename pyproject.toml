@@ -1,0 +1,48 @@
+[project]
+name = "anki-mcp-server"
+version = "0.2.0"
+description = "Model Context Protocol (MCP) server for managing Anki flashcards, decks, notetypes, tags, and media"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "D. Debnath", email = "d_debnath@outlook.com" }
+]
+keywords = [
+    "anki",
+    "mcp",
+    "model-context-protocol",
+    "flashcards",
+    "spaced-repetition",
+    "llm",
+    "ai",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Education",
+]
+dependencies = [
+    "anki>=26.8.1",
+    "mcp[cli]>=2.0.0",
+]
+
+[project.scripts]
+anki-mcp-server = "anki_mcp_server:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff.lint.isort]
+known-first-party = ["anki_mcp_server"]
