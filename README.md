@@ -148,13 +148,11 @@ claude --mcp-server "uv --directory '/path/to/anki-mcp-server' run anki-mcp-serv
 | `list_notetypes` | `output_file?: str` | Lists all available notetypes (e.g. `Basic`, `Cloze`) and their fields to disk. |
 | `get_notetype_info` | `notetype_name: str`, `output_file?: str` | Returns detailed schema, fields, and templates for a notetype to disk. |
 
-### 3. Flashcard & Note Management (File-Based)
+### 3. Flashcard & Note Ingestion & Mutation (File-Based)
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `add_note` | `input_file: str`, `deck_name?: str`, `output_file?: str` | Creates a standard note from a JSON file payload (`{deck_name, front, back, fields, tags, suspended}`). |
-| `add_cloze_note` | `input_file: str`, `deck_name?: str`, `output_file?: str` | Creates a Cloze deletion card from a JSON file payload (`{deck_name, text, extra, tags, suspended}`). |
-| `add_notes_batch` | `input_file: str`, `output_file?: str` | Adds multiple flashcards in a single atomic batch from a JSON array file. |
+| `add_notes` | `input_file: str`, `deck_name?: str`, `output_file?: str` | Ingests one or more flashcard notes (single note, cloze deletion, or batch array) atomically from a JSON payload. |
 | `get_note` | `note_id: int`, `output_file?: str` | Fetches a note by ID with fields, tags, notetype, and cards to disk. |
 | `update_note` | `note_id: int`, `input_file: str`, `output_file?: str` | Updates fields or tags on an existing note from a JSON payload. |
 | `delete_notes` | `note_ids?: list[int]`, `input_file?: str`, `output_file?: str` | Deletes notes and their cards by ID list or JSON file. |
@@ -164,8 +162,7 @@ claude --mcp-server "uv --directory '/path/to/anki-mcp-server' run anki-mcp-serv
 | Tool | Parameters | Description |
 |------|------------|-------------|
 | `store_media_file` | `source_path: str`, `target_name?: str` | Copies an image/diagram directly from disk into Anki's media storage and returns embed tags. |
-| `suspend_cards` | `card_ids?: list[int]`, `note_ids?: list[int]`, `query?: str`, `input_file?: str`, `output_file?: str` | Suspends cards from active review queues by IDs, query, or file. |
-| `unsuspend_cards` | `card_ids?: list[int]`, `note_ids?: list[int]`, `query?: str`, `input_file?: str`, `output_file?: str` | Restores suspended cards to active review queues by IDs, query, or file. |
+| `set_card_state` | `state: str = "suspended"`, `card_ids?: list[int]`, `note_ids?: list[int]`, `query?: str`, `input_file?: str`, `output_file?: str` | Sets card review queue state (`"suspended"` or `"active"`) across target cards, notes, queries, or files. |
 | `export_deck` | `deck_name: str`, `target_path: str`, `format: str = "apkg"`, `include_media: bool = True` | Exports a deck to `.apkg`, `.colpkg`, or `.json` on disk. |
 
 ### 5. Search & Discovery
@@ -180,8 +177,7 @@ claude --mcp-server "uv --directory '/path/to/anki-mcp-server' run anki-mcp-serv
 | Tool | Parameters | Description |
 |------|------------|-------------|
 | `list_tags` | `output_file?: str` | Lists all unique tags across the collection to disk. |
-| `add_tags_to_notes` | `note_ids?: list[int]`, `tags?: list[str]`, `input_file?: str`, `output_file?: str` | Adds tags in bulk to specified notes. |
-| `remove_tags_from_notes` | `note_ids?: list[int]`, `tags?: list[str]`, `input_file?: str`, `output_file?: str` | Removes tags in bulk from specified notes. |
+| `update_note_tags` | `action: str = "add"`, `tags?: list[str]`, `note_ids?: list[int]`, `input_file?: str`, `output_file?: str` | Adds or removes tags in bulk across notes specified directly or within a JSON file. |
 | `get_collection_stats` | `output_file?: str` | Returns summary statistics (total notes, cards, new/due cards, deck breakdown). |
 
 ---

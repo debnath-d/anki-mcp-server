@@ -8,14 +8,18 @@ import unittest
 from pathlib import Path
 
 from anki.errors import AnkiError, NotFoundError
+from mcp.types import CallToolResult, GetPromptResult
 
-from anki_mcp_server.collection import get_collection, get_default_collection_path
+from anki_mcp_server.collection import (
+    IsolatedAnkiAdapter,
+    NativeAnkiAdapter,
+    get_collection,
+    get_default_collection_path,
+    set_collection_adapter,
+)
 from anki_mcp_server.io_utils import read_json_file
 from anki_mcp_server.server import (
-    add_cloze_note,
-    add_note,
-    add_notes_batch,
-    add_tags_to_notes,
+    add_notes,
     change_deck,
     create_deck,
     delete_deck,
@@ -27,19 +31,30 @@ from anki_mcp_server.server import (
     list_decks,
     list_notetypes,
     list_tags,
-    remove_tags_from_notes,
     rename_deck,
     search_cards,
     search_notes,
     server,
+    set_card_state,
     store_media_file,
-    suspend_cards,
-    unsuspend_cards,
     update_note,
+    update_note_tags,
 )
 
 
 class TestAnkiMcpServer(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Establish hermetic testing via IsolatedAnkiAdapter
+        cls.isolated_adapter = IsolatedAnkiAdapter()
+        cls.isolated_adapter.setup()
+        set_collection_adapter(cls.isolated_adapter)
+
+    @classmethod
+    def tearDownClass(cls):
+        set_collection_adapter(NativeAnkiAdapter())
+        cls.isolated_adapter.cleanup()
+
     def setUp(self):
         self.test_deck = "_UnitTest_Deck"
         self.created_note_ids: list[int] = []
@@ -98,21 +113,17 @@ class TestAnkiMcpServer(unittest.TestCase):
                 "rename_deck",
                 "change_deck",
                 "store_media_file",
-                "suspend_cards",
-                "unsuspend_cards",
                 "list_notetypes",
                 "get_notetype_info",
-                "add_note",
-                "add_cloze_note",
-                "add_notes_batch",
+                "add_notes",
                 "get_note",
                 "update_note",
                 "delete_notes",
+                "set_card_state",
+                "update_note_tags",
                 "search_notes",
                 "search_cards",
                 "list_tags",
-                "add_tags_to_notes",
-                "remove_tags_from_notes",
                 "get_collection_stats",
                 "export_deck",
             }
@@ -131,6 +142,8 @@ class TestAnkiMcpServer(unittest.TestCase):
             self.assertIn("flashcard_generator", prompt_names)
 
             tool_result = await server.call_tool("list_decks", {})
+            self.assertIsInstance(tool_result, CallToolResult)
+            assert isinstance(tool_result, CallToolResult)
             self.assertFalse(tool_result.is_error)
             self.assertTrue(len(tool_result.content) > 0)
 
@@ -138,6 +151,8 @@ class TestAnkiMcpServer(unittest.TestCase):
                 "flashcard_generator",
                 {"topic": "Algorithms", "concept": "Binary Search"},
             )
+            self.assertIsInstance(prompt_res, GetPromptResult)
+            assert isinstance(prompt_res, GetPromptResult)
             self.assertTrue(len(prompt_res.messages) > 0)
 
         asyncio.run(run_check())
@@ -183,9 +198,10 @@ class TestAnkiMcpServer(unittest.TestCase):
                 "tags": ["unittest", "change-deck-test"],
             }
         )
-        res = add_note(input_file=str(note_json))
-        nid = res["summary"]["note_id"]
-        cid = res["summary"]["card_ids"][0]
+        res = add_notes(input_file=str(note_json))
+        nid = res["summary"]["sample_note_ids"][0]
+        notes_data = read_json_file(res["output_file"])
+        cid = notes_data[0]["card_ids"][0]
         self.created_note_ids.append(nid)
 
         # 1. Move by card_ids
@@ -233,7 +249,7 @@ class TestAnkiMcpServer(unittest.TestCase):
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
-    def test_suspend_and_unsuspend_cards(self):
+    def test_set_card_state(self):
         create_deck(self.test_deck)
         note_json = self._create_temp_json(
             {
@@ -243,9 +259,10 @@ class TestAnkiMcpServer(unittest.TestCase):
                 "tags": ["unittest", "suspend-test"],
             }
         )
-        res = add_note(input_file=str(note_json))
-        nid = res["summary"]["note_id"]
-        cid = res["summary"]["card_ids"][0]
+        res = add_notes(input_file=str(note_json))
+        nid = res["summary"]["sample_note_ids"][0]
+        notes_data = read_json_file(res["output_file"])
+        cid = notes_data[0]["card_ids"][0]
         self.created_note_ids.append(nid)
 
         sc = search_cards(f"cid:{cid}")
@@ -253,29 +270,31 @@ class TestAnkiMcpServer(unittest.TestCase):
         self.assertNotEqual(cards[0]["queue"], "suspended")
 
         # Suspend by card_id
-        susp_res = suspend_cards(card_ids=[cid])
+        susp_res = set_card_state(state="suspended", card_ids=[cid])
         self.assertEqual(susp_res["status"], "success")
+        self.assertEqual(susp_res["summary"]["state"], "suspended")
         sc2 = search_cards(f"cid:{cid}")
         cards2 = read_json_file(sc2["output_file"])
         self.assertEqual(cards2[0]["queue"], "suspended")
 
         # Unsuspend by note_id
-        unsusp_res = unsuspend_cards(note_ids=[nid])
+        unsusp_res = set_card_state(state="active", note_ids=[nid])
         self.assertEqual(unsusp_res["status"], "success")
+        self.assertEqual(unsusp_res["summary"]["state"], "active")
         sc3 = search_cards(f"cid:{cid}")
         cards3 = read_json_file(sc3["output_file"])
         self.assertNotEqual(cards3[0]["queue"], "suspended")
 
         # Suspend via input_file query
         susp_json = self._create_temp_json({"query": "tag:suspend-test"})
-        susp_res2 = suspend_cards(input_file=str(susp_json))
+        susp_res2 = set_card_state(state="suspended", input_file=str(susp_json))
         self.assertEqual(susp_res2["status"], "success")
         sc4 = search_cards(f"cid:{cid}")
         cards4 = read_json_file(sc4["output_file"])
         self.assertEqual(cards4[0]["queue"], "suspended")
 
         # Unsuspend by query
-        unsusp_res2 = unsuspend_cards(query="tag:suspend-test")
+        unsusp_res2 = set_card_state(state="active", query="tag:suspend-test")
         self.assertEqual(unsusp_res2["status"], "success")
         sc5 = search_cards(f"cid:{cid}")
         cards5 = read_json_file(sc5["output_file"])
@@ -292,11 +311,12 @@ class TestAnkiMcpServer(unittest.TestCase):
                 "suspended": True,
             }
         )
-        res = add_note(input_file=str(note_json))
-        nid = res["summary"]["note_id"]
-        cid = res["summary"]["card_ids"][0]
+        res = add_notes(input_file=str(note_json))
+        nid = res["summary"]["sample_note_ids"][0]
+        notes_data = read_json_file(res["output_file"])
+        cid = notes_data[0]["card_ids"][0]
         self.created_note_ids.append(nid)
-        self.assertTrue(res["summary"]["suspended"])
+        self.assertTrue(notes_data[0]["suspended"])
 
         sc = search_cards(f"cid:{cid}")
         cards = read_json_file(sc["output_file"])
@@ -306,14 +326,16 @@ class TestAnkiMcpServer(unittest.TestCase):
             {
                 "deck_name": self.test_deck,
                 "text": "The Euler characteristic of a sphere is {{c1::2}}.",
+                "is_cloze": True,
                 "suspended": True,
             }
         )
-        cloze_res = add_cloze_note(input_file=str(cloze_json))
-        cloze_nid = cloze_res["summary"]["note_id"]
-        cloze_cid = cloze_res["summary"]["card_ids"][0]
+        cloze_res = add_notes(input_file=str(cloze_json))
+        cloze_nid = cloze_res["summary"]["sample_note_ids"][0]
+        cloze_notes_data = read_json_file(cloze_res["output_file"])
+        cloze_cid = cloze_notes_data[0]["card_ids"][0]
         self.created_note_ids.append(cloze_nid)
-        self.assertTrue(cloze_res["summary"]["suspended"])
+        self.assertTrue(cloze_notes_data[0]["suspended"])
 
         sc2 = search_cards(f"cid:{cloze_cid}")
         cards2 = read_json_file(sc2["output_file"])
@@ -344,9 +366,9 @@ class TestAnkiMcpServer(unittest.TestCase):
                 "tags": ["test::statistics", "unittest"],
             }
         )
-        res = add_note(input_file=str(note_json))
+        res = add_notes(input_file=str(note_json))
         self.assertEqual(res["status"], "success")
-        nid = res["summary"]["note_id"]
+        nid = res["summary"]["sample_note_ids"][0]
         self.created_note_ids.append(nid)
 
         note_res = get_note(nid)
@@ -368,7 +390,7 @@ class TestAnkiMcpServer(unittest.TestCase):
         )
         up_res = update_note(note_id=nid, input_file=str(update_json))
         self.assertEqual(up_res["status"], "success")
-        self.assertIn("updated", up_res["summary"]["tags"])
+        self.assertIn("updated", up_res["summary"]["sample_tags"])
 
         note_res2 = get_note(nid)
         updated_note = read_json_file(note_res2["output_file"])
@@ -382,12 +404,13 @@ class TestAnkiMcpServer(unittest.TestCase):
                 "deck_name": self.test_deck,
                 "text": "The standard deviation of variance $\\sigma^2$ is {{c1::$\\sigma$}}.",
                 "extra": "Basic definition",
+                "is_cloze": True,
                 "tags": ["unittest", "cloze-test"],
             }
         )
-        res = add_cloze_note(input_file=str(cloze_json))
+        res = add_notes(input_file=str(cloze_json))
         self.assertEqual(res["status"], "success")
-        nid = res["summary"]["note_id"]
+        nid = res["summary"]["sample_note_ids"][0]
         self.created_note_ids.append(nid)
 
         note_res = get_note(nid)
@@ -420,12 +443,12 @@ class TestAnkiMcpServer(unittest.TestCase):
                 ],
             }
         )
-        res = add_notes_batch(input_file=str(batch_json))
+        res = add_notes(input_file=str(batch_json))
         self.assertEqual(res["status"], "success")
         self.assertEqual(res["summary"]["total_created"], 3)
 
         batch_result = read_json_file(res["output_file"])
-        for n in batch_result["notes"]:
+        for n in batch_result:
             self.created_note_ids.append(n["note_id"])
 
         search_res = search_notes(f'deck:"{self.test_deck}" tag:batch')
@@ -433,7 +456,7 @@ class TestAnkiMcpServer(unittest.TestCase):
         self.assertEqual(search_res["summary"]["total_matches"], 3)
 
         # Verify suspended card in batch
-        susp_card_id = batch_result["notes"][2]["card_ids"][0]
+        susp_card_id = batch_result[2]["card_ids"][0]
         sc = search_cards(f"cid:{susp_card_id}")
         cards = read_json_file(sc["output_file"])
         self.assertEqual(cards[0]["queue"], "suspended")
@@ -448,17 +471,17 @@ class TestAnkiMcpServer(unittest.TestCase):
                 "tags": ["initial-tag"],
             }
         )
-        res = add_note(input_file=str(note_json))
-        nid = res["summary"]["note_id"]
+        res = add_notes(input_file=str(note_json))
+        nid = res["summary"]["sample_note_ids"][0]
         self.created_note_ids.append(nid)
 
-        add_tags_to_notes(note_ids=[nid], tags=["new-tag-1", "new-tag-2"])
+        update_note_tags(action="add", note_ids=[nid], tags=["new-tag-1", "new-tag-2"])
         note_res = get_note(nid)
         note_data = read_json_file(note_res["output_file"])
         self.assertIn("new-tag-1", note_data["tags"])
         self.assertIn("new-tag-2", note_data["tags"])
 
-        remove_tags_from_notes(note_ids=[nid], tags=["new-tag-1"])
+        update_note_tags(action="remove", note_ids=[nid], tags=["new-tag-1"])
         note_res2 = get_note(nid)
         note_data2 = read_json_file(note_res2["output_file"])
         self.assertNotIn("new-tag-1", note_data2["tags"])
@@ -490,8 +513,9 @@ class TestAnkiMcpServer(unittest.TestCase):
                 "tags": ["unittest", "export-test"],
             }
         )
-        res = add_note(input_file=str(note_json))
-        self.created_note_ids.append(res["summary"]["note_id"])
+        res = add_notes(input_file=str(note_json))
+        nid = res["summary"]["sample_note_ids"][0]
+        self.created_note_ids.append(nid)
 
         # 1. Export as .apkg
         with tempfile.NamedTemporaryFile(suffix=".apkg", delete=False) as tmp:
@@ -539,7 +563,7 @@ class TestAnkiMcpServer(unittest.TestCase):
         self.assertTrue(Path(json_target).exists())
         json_data = read_json_file(json_target)
         self.assertEqual(len(json_data), 1)
-        self.assertEqual(json_data[0]["note_id"], res["summary"]["note_id"])
+        self.assertEqual(json_data[0]["note_id"], nid)
 
     def test_negative_validations(self):
         # 1. Non-existent deck deletion by name
@@ -550,7 +574,7 @@ class TestAnkiMcpServer(unittest.TestCase):
         with self.assertRaises(ValueError):
             delete_deck()
 
-        # 3. Invalid notetype in add_note
+        # 3. Invalid notetype in add_notes
         invalid_nt_json = self._create_temp_json(
             {
                 "deck_name": self.test_deck,
@@ -560,7 +584,7 @@ class TestAnkiMcpServer(unittest.TestCase):
             }
         )
         with self.assertRaises(ValueError):
-            add_note(input_file=str(invalid_nt_json))
+            add_notes(input_file=str(invalid_nt_json))
 
         # 4. Invalid field on notetype
         invalid_field_json = self._create_temp_json(
@@ -571,7 +595,7 @@ class TestAnkiMcpServer(unittest.TestCase):
             }
         )
         with self.assertRaises(ValueError):
-            add_note(input_file=str(invalid_field_json))
+            add_notes(input_file=str(invalid_field_json))
 
         # 5. Empty change_deck criteria
         with self.assertRaises(ValueError):

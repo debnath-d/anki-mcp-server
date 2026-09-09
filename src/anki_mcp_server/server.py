@@ -6,7 +6,7 @@ from typing import Any
 
 import anki.collection  # noqa: F401 - Required before other anki imports in Python 3.14
 from anki.cards import CardId
-from anki.collection import AddNoteRequest, Collection
+from anki.collection import Collection
 from anki.decks import DeckId
 from anki.errors import AnkiError, NotFoundError
 from anki.exporting import AnkiPackageExporter
@@ -14,17 +14,15 @@ from anki.notes import NoteId
 from mcp.server import MCPServer
 
 from anki_mcp_server.collection import get_collection
-from anki_mcp_server.io_utils import (
-    format_telemetry,
-    make_response,
-    read_json_file,
-    write_tool_output,
-)
+from anki_mcp_server.io_utils import format_telemetry, write_tool_output
+from anki_mcp_server.notes import ingest_notes
+from anki_mcp_server.pipeline import execute_tool
+from anki_mcp_server.selector import TargetSpec
 
 server = MCPServer(
     name="anki-mcp-server",
     instructions="Universal File-Based I/O MCP Server for managing Anki flashcards, decks, notetypes, tags, media, and search.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 CARD_QUEUE_NAMES: dict[int, str] = {
@@ -47,136 +45,6 @@ CARD_TYPE_NAMES: dict[int, str] = {
 
 
 # ============================================================================
-# Internal Resolution & Construction Helpers
-# ============================================================================
-
-
-def _resolve_card_ids(
-    col: Collection,
-    card_ids: list[int] | None = None,
-    note_ids: list[int] | None = None,
-    query: str | None = None,
-    input_file: str | None = None,
-) -> list[CardId]:
-    """Extract and validate a deduplicated list of CardIds from explicit IDs, note IDs, search queries, or input files."""
-    target_cids: set[int] = set()
-
-    if input_file:
-        file_data = read_json_file(input_file)
-        if isinstance(file_data, dict):
-            card_ids = card_ids or file_data.get("card_ids")
-            note_ids = note_ids or file_data.get("note_ids")
-            query = query or file_data.get("query")
-        elif isinstance(file_data, list):
-            card_ids = card_ids or file_data
-
-    if card_ids:
-        target_cids.update(card_ids)
-
-    if note_ids:
-        for nid in note_ids:
-            try:
-                note = col.get_note(NoteId(nid))
-                target_cids.update(note.card_ids())
-            except (AnkiError, NotFoundError, KeyError):
-                continue
-
-    if query:
-        target_cids.update(col.find_cards(query))
-
-    if not target_cids:
-        raise ValueError("No cards specified or found matching the criteria.")
-
-    return [CardId(cid) for cid in target_cids]
-
-
-def _resolve_note_ids(
-    note_ids: list[int] | None = None,
-    input_file: str | None = None,
-) -> list[NoteId]:
-    """Extract and validate a list of NoteIds from an argument list or input JSON file."""
-    if input_file:
-        file_data = read_json_file(input_file)
-        if isinstance(file_data, list):
-            note_ids = note_ids or file_data
-        elif isinstance(file_data, dict):
-            note_ids = note_ids or file_data.get("note_ids")
-
-    if not note_ids:
-        raise ValueError("Must provide 'note_ids' directly or inside 'input_file'.")
-
-    return [NoteId(nid) for nid in note_ids]
-
-
-def _build_note(
-    col: Collection,
-    data: dict[str, Any],
-    default_deck: str | None = None,
-    default_suspended: bool = False,
-) -> tuple[AddNoteRequest, bool]:
-    """Instantiate and populate an AddNoteRequest and suspension flag from a note specification dictionary."""
-    deck_name = data.get("deck_name") or data.get("deck") or default_deck
-    if not deck_name:
-        raise ValueError("Must specify 'deck_name' for note.")
-
-    deck_id = col.decks.id(deck_name)
-    is_cloze = bool(data.get("is_cloze", False))
-    notetype_name = data.get("notetype_name") or data.get("notetype")
-
-    if notetype_name:
-        notetype = col.models.by_name(notetype_name)
-        if not notetype:
-            raise ValueError(f"Notetype '{notetype_name}' not found in collection.")
-    elif is_cloze:
-        notetype = col.models.by_name("Cloze")
-        if not notetype:
-            raise ValueError("Stock 'Cloze' notetype not found in collection.")
-    else:
-        notetype = col.models.by_name("Basic")
-        if not notetype:
-            raise ValueError("Stock 'Basic' notetype not found in collection.")
-
-    note = col.new_note(notetype)
-    fields = data.get("fields")
-    is_model_cloze = notetype.get("type") == 1
-
-    if fields:
-        for f_name, f_val in fields.items():
-            if f_name in note:
-                note[f_name] = str(f_val)
-            else:
-                raise ValueError(
-                    f"Field '{f_name}' does not exist on notetype '{notetype['name']}'. "
-                    f"Available fields: {col.models.field_names(notetype)}"
-                )
-    elif is_model_cloze or is_cloze:
-        text = data.get("text") or data.get("front", "")
-        if not text:
-            raise ValueError(
-                "Cloze note payload must contain non-empty 'text' or 'front'."
-            )
-        note["Text"] = text
-        if "Extra" in note:
-            note["Extra"] = data.get("extra") or data.get("back", "")
-    else:
-        field_names = col.models.field_names(notetype)
-        front = data.get("front", "")
-        back = data.get("back", "")
-        if len(field_names) >= 2:
-            note[field_names[0]] = front
-            note[field_names[1]] = back
-        elif len(field_names) == 1:
-            note[field_names[0]] = front
-        else:
-            raise ValueError(f"Notetype '{notetype['name']}' has no fields.")
-
-    note.tags = list(data.get("tags") or [])
-    suspended = bool(data.get("suspended", default_suspended))
-
-    return AddNoteRequest(note=note, deck_id=deck_id), suspended
-
-
-# ============================================================================
 # Deck Management Tools
 # ============================================================================
 
@@ -184,40 +52,49 @@ def _build_note(
 @server.tool()
 def list_decks(output_file: str | None = None) -> dict[str, Any]:
     """List all decks in the Anki collection with their IDs and card counts."""
-    with get_collection() as col:
-        full_decks = [
+
+    def action(col: Collection, _: Any) -> list[dict[str, Any]]:
+        return [
             {
                 "id": entry.id,
                 "name": entry.name,
                 "card_count": col.decks.card_count(
-                    dids=entry.id, include_subdecks=True
+                    dids=DeckId(entry.id), include_subdecks=True
                 ),
             }
             for entry in col.decks.all_names_and_ids()
         ]
-        return make_response(
-            operation="list_decks",
-            payload=full_decks,
-            summary={
-                "deck_count": len(full_decks),
-                "total_cards": sum(d["card_count"] for d in full_decks),
-                "sample_decks": [d["name"] for d in full_decks[:5]],
-            },
-            output_file=output_file,
-        )
+
+    def summary_fn(data: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "deck_count": len(data),
+            "total_cards": sum(d["card_count"] for d in data),
+            "sample_decks": [d["name"] for d in data[:5]],
+        }
+
+    return execute_tool(
+        operation="list_decks",
+        action=action,
+        output_file=output_file,
+        summary_fn=summary_fn,
+    )
 
 
 @server.tool()
 def create_deck(deck_name: str, output_file: str | None = None) -> dict[str, Any]:
     """Create a new deck or subdeck (e.g. 'Computer Science::Algorithms')."""
-    with get_collection() as col:
+
+    def action(col: Collection, _: Any) -> dict[str, Any]:
         deck_id = col.decks.id(deck_name)
-        return make_response(
-            operation="create_deck",
-            payload={"status": "success", "deck_id": deck_id, "deck_name": deck_name},
-            summary={"deck_id": deck_id, "deck_name": deck_name},
-            output_file=output_file,
-        )
+        if deck_id is None:
+            raise ValueError(f"Could not find or create deck '{deck_name}'.")
+        return {"deck_id": int(deck_id), "deck_name": deck_name}
+
+    return execute_tool(
+        operation="create_deck",
+        action=action,
+        output_file=output_file,
+    )
 
 
 @server.tool()
@@ -227,7 +104,9 @@ def delete_deck(
     output_file: str | None = None,
 ) -> dict[str, Any]:
     """Delete a deck and all cards contained within it by deck ID or deck name."""
-    with get_collection() as col:
+
+    def action(col: Collection, _: Any) -> dict[str, Any]:
+        nonlocal deck_id
         if deck_name and not deck_id:
             resolved_id = col.decks.id_for_name(deck_name)
             if not resolved_id:
@@ -238,12 +117,13 @@ def delete_deck(
             raise ValueError("Must provide either deck_id or deck_name.")
 
         col.decks.remove([DeckId(deck_id)])
-        return make_response(
-            operation="delete_deck",
-            payload={"status": "success", "deleted_deck_id": deck_id},
-            summary={"deleted_deck_id": deck_id},
-            output_file=output_file,
-        )
+        return {"deleted_deck_id": deck_id}
+
+    return execute_tool(
+        operation="delete_deck",
+        action=action,
+        output_file=output_file,
+    )
 
 
 @server.tool()
@@ -251,23 +131,24 @@ def rename_deck(
     deck_id: int, new_name: str, output_file: str | None = None
 ) -> dict[str, Any]:
     """Rename an existing deck (and its child subdecks) by deck ID."""
-    with get_collection() as col:
+
+    def action(col: Collection, _: Any) -> dict[str, Any]:
         deck = col.decks.get(DeckId(deck_id))
         if not deck:
             raise ValueError(f"Deck with ID {deck_id} not found.")
         old_name = deck["name"]
         col.decks.rename(DeckId(deck_id), new_name)
-        return make_response(
-            operation="rename_deck",
-            payload={
-                "status": "success",
-                "deck_id": deck_id,
-                "old_name": old_name,
-                "new_name": new_name,
-            },
-            summary={"deck_id": deck_id, "old_name": old_name, "new_name": new_name},
-            output_file=output_file,
-        )
+        return {
+            "deck_id": deck_id,
+            "old_name": old_name,
+            "new_name": new_name,
+        }
+
+    return execute_tool(
+        operation="rename_deck",
+        action=action,
+        output_file=output_file,
+    )
 
 
 @server.tool()
@@ -280,50 +161,512 @@ def change_deck(
     output_file: str | None = None,
 ) -> dict[str, Any]:
     """Move cards to a target deck by card IDs, note IDs, search query, or input file."""
-    if input_file and not target_deck_name:
-        file_data = read_json_file(input_file)
-        if isinstance(file_data, dict):
-            target_deck_name = file_data.get("target_deck_name") or file_data.get(
-                "deck_name"
+    spec = TargetSpec(
+        card_ids=card_ids, note_ids=note_ids, query=query, input_file=input_file
+    )
+
+    def action(col: Collection, _: Any) -> dict[str, Any]:
+        deck_name = target_deck_name
+        if spec.input_file and not deck_name:
+            file_data = spec.get_file_payload()
+            if isinstance(file_data, dict):
+                deck_name = file_data.get("target_deck_name") or file_data.get(
+                    "deck_name"
+                )
+
+        if not deck_name:
+            raise ValueError(
+                "Must provide 'target_deck_name' directly or inside 'input_file'."
             )
 
-    if not target_deck_name:
-        raise ValueError(
-            "Must provide 'target_deck_name' directly or inside 'input_file'."
-        )
-
-    with get_collection() as col:
-        cids = _resolve_card_ids(
-            col,
-            card_ids=card_ids,
-            note_ids=note_ids,
-            query=query,
-            input_file=input_file,
-        )
-        target_deck_id = col.decks.id(target_deck_name)
+        cids = spec.resolve_card_ids(col)
+        target_deck_id = col.decks.id(deck_name)
+        if target_deck_id is None:
+            raise ValueError(f"Target deck '{deck_name}' not found.")
         col.set_deck(cids, target_deck_id)
 
-        return make_response(
-            operation="change_deck",
-            payload={
-                "status": "success",
-                "target_deck_name": target_deck_name,
-                "target_deck_id": target_deck_id,
-                "cards_moved": len(cids),
-                "card_ids": [int(c) for c in cids],
-            },
-            summary={
-                "target_deck_name": target_deck_name,
-                "cards_moved": len(cids),
-                "sample_card_ids": [int(c) for c in cids[:5]],
-            },
-            output_file=output_file,
-        )
+        return {
+            "target_deck_name": deck_name,
+            "target_deck_id": int(target_deck_id),
+            "cards_moved": len(cids),
+            "card_ids": [int(c) for c in cids],
+        }
+
+    return execute_tool(
+        operation="change_deck",
+        action=action,
+        output_file=output_file,
+    )
 
 
 # ============================================================================
-# Media Management Tools
+# Notetype (Model) Tools
 # ============================================================================
+
+
+@server.tool()
+def list_notetypes(output_file: str | None = None) -> dict[str, Any]:
+    """List all available notetypes (models) in the collection, their fields, and types."""
+
+    def action(col: Collection, _: Any) -> list[dict[str, Any]]:
+        def _format_nt(entry: Any) -> dict[str, Any]:
+            model = col.models.get(entry.id)
+            fields = col.models.field_names(model) if model else []
+            is_cloze = (model.get("type") == 1) if model else False
+            return {
+                "id": entry.id,
+                "name": entry.name,
+                "fields": fields,
+                "type": "cloze" if is_cloze else "standard",
+            }
+
+        return [_format_nt(entry) for entry in col.models.all_names_and_ids()]
+
+    def summary_fn(data: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "notetype_count": len(data),
+            "notetype_names": [nt["name"] for nt in data],
+        }
+
+    return execute_tool(
+        operation="list_notetypes",
+        action=action,
+        output_file=output_file,
+        summary_fn=summary_fn,
+    )
+
+
+@server.tool()
+def get_notetype_info(
+    notetype_name: str, output_file: str | None = None
+) -> dict[str, Any]:
+    """Get detailed schema information about a specific notetype."""
+
+    def action(col: Collection, _: Any) -> dict[str, Any]:
+        model = col.models.by_name(notetype_name)
+        if not model:
+            raise ValueError(f"Notetype '{notetype_name}' not found.")
+
+        return {
+            "id": model["id"],
+            "name": model["name"],
+            "fields": col.models.field_names(model),
+            "templates": [t.get("name", "") for t in model.get("tmpls", [])],
+            "css": model.get("css", ""),
+            "type": "cloze" if model.get("type") == 1 else "standard",
+        }
+
+    def summary_fn(data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": data["id"],
+            "name": data["name"],
+            "fields": data["fields"],
+            "templates": data["templates"],
+            "type": data["type"],
+        }
+
+    return execute_tool(
+        operation="get_notetype_info",
+        action=action,
+        prefix=f"notetype_{notetype_name}",
+        output_file=output_file,
+        summary_fn=summary_fn,
+    )
+
+
+# ============================================================================
+# Consolidated Card & Note Ingestion Tools
+# ============================================================================
+
+
+@server.tool()
+def add_notes(
+    input_file: str,
+    deck_name: str | None = None,
+    output_file: str | None = None,
+) -> dict[str, Any]:
+    """Ingest one or more flashcard notes (single note, cloze deletion, or batch array) from a JSON file."""
+
+    def action(col: Collection, payload: Any) -> list[dict[str, Any]]:
+        ingested = ingest_notes(col, payload, default_deck=deck_name)
+        return [note.to_dict() for note in ingested]
+
+    def summary_fn(data: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "total_created": len(data),
+            "total_cards": sum(n["cards_generated"] for n in data),
+            "sample_note_ids": [n["note_id"] for n in data[:5]],
+            "sample_decks": list({n["deck_name"] for n in data})[:5],
+        }
+
+    return execute_tool(
+        operation="add_notes",
+        action=action,
+        input_file=input_file,
+        output_file=output_file,
+        summary_fn=summary_fn,
+    )
+
+
+# ============================================================================
+# Note Inspection & Mutation Tools
+# ============================================================================
+
+
+@server.tool()
+def get_note(note_id: int, output_file: str | None = None) -> dict[str, Any]:
+    """Retrieve complete information about a note by its ID."""
+
+    def action(col: Collection, _: Any) -> dict[str, Any]:
+        note = col.get_note(NoteId(note_id))
+        cards = note.cards()
+        deck = col.decks.get(cards[0].did) if cards else None
+        deck_name = deck.get("name") if deck else None
+
+        return {
+            "note_id": int(note.id),
+            "guid": note.guid,
+            "notetype_id": int(note.mid),
+            "deck_name": deck_name,
+            "tags": list(note.tags),
+            "fields": dict(note.items()),
+            "card_ids": [int(c) for c in note.card_ids()],
+            "cards_count": len(cards),
+            "modified_time": note.mod,
+        }
+
+    return execute_tool(
+        operation="get_note",
+        action=action,
+        prefix=f"get_note_{note_id}",
+        output_file=output_file,
+    )
+
+
+@server.tool()
+def update_note(
+    note_id: int,
+    input_file: str,
+    output_file: str | None = None,
+) -> dict[str, Any]:
+    """Update fields and/or tags of an existing note from a JSON file."""
+
+    def action(col: Collection, data: Any) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            raise TypeError(f"Input file '{input_file}' must contain a JSON object.")
+
+        fields = data.get("fields")
+        tags = data.get("tags")
+
+        note = col.get_note(NoteId(note_id))
+
+        if fields:
+            for field_name, value in fields.items():
+                if field_name in note:
+                    note[field_name] = value
+                else:
+                    raise ValueError(
+                        f"Field '{field_name}' not found on note {note_id}."
+                    )
+
+        if tags is not None:
+            note.tags = list(tags)
+
+        col.update_note(note)
+
+        return {
+            "note_id": int(note.id),
+            "tags": list(note.tags),
+            "fields": dict(note.items()),
+            "updated_fields": list(fields.keys()) if fields else [],
+        }
+
+    return execute_tool(
+        operation="update_note",
+        action=action,
+        input_file=input_file,
+        prefix=f"update_note_{note_id}",
+        output_file=output_file,
+    )
+
+
+@server.tool()
+def delete_notes(
+    note_ids: list[int] | None = None,
+    input_file: str | None = None,
+    output_file: str | None = None,
+) -> dict[str, Any]:
+    """Delete notes (and all cards generated from them) by their Note IDs or from a JSON file list."""
+    spec = TargetSpec(note_ids=note_ids, input_file=input_file)
+
+    def action(col: Collection, _: Any) -> dict[str, Any]:
+        nids = spec.resolve_note_ids(col)
+        col.remove_notes(nids)
+        return {
+            "deleted_count": len(nids),
+            "deleted_note_ids": [int(nid) for nid in nids],
+        }
+
+    return execute_tool(
+        operation="delete_notes",
+        action=action,
+        output_file=output_file,
+    )
+
+
+# ============================================================================
+# Consolidated State & Tag Control Tools
+# ============================================================================
+
+
+@server.tool()
+def set_card_state(
+    state: str = "suspended",
+    card_ids: list[int] | None = None,
+    note_ids: list[int] | None = None,
+    query: str | None = None,
+    input_file: str | None = None,
+    output_file: str | None = None,
+) -> dict[str, Any]:
+    """Set card review queue state ('suspended' or 'active') across target cards, notes, queries, or files."""
+    spec = TargetSpec(
+        card_ids=card_ids, note_ids=note_ids, query=query, input_file=input_file
+    )
+
+    def action(col: Collection, _: Any) -> dict[str, Any]:
+        cids = spec.resolve_card_ids(col)
+        norm_state = state.strip().lower()
+
+        if norm_state in ("suspended", "suspend"):
+            col.sched.suspend_cards(cids)
+            resolved_state = "suspended"
+        elif norm_state in ("active", "unsuspended", "unsuspend"):
+            col.sched.unsuspend_cards(cids)
+            resolved_state = "active"
+        else:
+            raise ValueError(
+                f"Invalid card state '{state}'. Expected 'suspended' or 'active'."
+            )
+
+        return {
+            "state": resolved_state,
+            "cards_affected": len(cids),
+            "card_ids": [int(c) for c in cids],
+        }
+
+    return execute_tool(
+        operation="set_card_state",
+        action=action,
+        output_file=output_file,
+    )
+
+
+@server.tool()
+def update_note_tags(
+    action: str = "add",
+    tags: list[str] | None = None,
+    note_ids: list[int] | None = None,
+    input_file: str | None = None,
+    output_file: str | None = None,
+) -> dict[str, Any]:
+    """Add or remove tags in bulk across notes specified directly or within a JSON payload file."""
+    spec = TargetSpec(note_ids=note_ids, input_file=input_file)
+
+    def run_action(col: Collection, _: Any) -> dict[str, Any]:
+        target_tags = tags
+        if spec.input_file and target_tags is None:
+            file_data = spec.get_file_payload()
+            if isinstance(file_data, dict):
+                target_tags = file_data.get("tags")
+
+        if not target_tags:
+            raise ValueError("Must provide 'tags' directly or inside 'input_file'.")
+
+        nids = spec.resolve_note_ids(col)
+        norm_action = action.strip().lower()
+        tag_str = " ".join(target_tags)
+
+        if norm_action == "add":
+            col.tags.bulk_add(nids, tag_str)
+        elif norm_action == "remove":
+            col.tags.bulk_remove(nids, tag_str)
+        else:
+            raise ValueError(
+                f"Invalid tag action '{action}'. Expected 'add' or 'remove'."
+            )
+
+        return {
+            "action": norm_action,
+            "notes_affected": len(nids),
+            "note_ids": [int(nid) for nid in nids],
+            "tags": target_tags,
+        }
+
+    return execute_tool(
+        operation="update_note_tags",
+        action=run_action,
+        output_file=output_file,
+    )
+
+
+# ============================================================================
+# Search & Tag Inspection Tools
+# ============================================================================
+
+
+@server.tool()
+def list_tags(output_file: str | None = None) -> dict[str, Any]:
+    """List all unique tags across the collection, writing full tag array to disk."""
+
+    def action(col: Collection, _: Any) -> list[str]:
+        return col.tags.all()
+
+    def summary_fn(data: list[str]) -> dict[str, Any]:
+        return {
+            "tag_count": len(data),
+            "sample_tags": data[:10],
+        }
+
+    return execute_tool(
+        operation="list_tags",
+        action=action,
+        output_file=output_file,
+        summary_fn=summary_fn,
+    )
+
+
+@server.tool()
+def search_notes(
+    query: str, limit: int = 500, output_file: str | None = None
+) -> dict[str, Any]:
+    """Search notes using Anki browser syntax, writing full matched cards/fields to disk."""
+
+    def action(col: Collection, _: Any) -> list[dict[str, Any]]:
+        note_ids = col.find_notes(query)[:limit]
+        results = []
+        for nid in note_ids:
+            try:
+                note = col.get_note(nid)
+                cards = note.cards()
+                deck = col.decks.get(cards[0].did) if cards else None
+                results.append(
+                    {
+                        "note_id": int(note.id),
+                        "deck_name": deck.get("name") if deck else None,
+                        "tags": list(note.tags),
+                        "fields": dict(note.items()),
+                    }
+                )
+            except (AnkiError, NotFoundError, KeyError):
+                continue
+        return results
+
+    def summary_fn(data: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "query": query,
+            "total_matches": len(data),
+            "sample_note_ids": [r["note_id"] for r in data[:5]],
+        }
+
+    return execute_tool(
+        operation="search_notes",
+        action=action,
+        output_file=output_file,
+        summary_fn=summary_fn,
+    )
+
+
+@server.tool()
+def search_cards(
+    query: str, limit: int = 500, output_file: str | None = None
+) -> dict[str, Any]:
+    """Search cards using Anki browser syntax, returning card queue status, due dates, and intervals to disk."""
+
+    def action(col: Collection, _: Any) -> list[dict[str, Any]]:
+        card_ids = col.find_cards(query)[:limit]
+        results = []
+        for cid in card_ids:
+            try:
+                card = col.get_card(CardId(cid))
+                deck = col.decks.get(card.did)
+                results.append(
+                    {
+                        "card_id": int(card.id),
+                        "note_id": int(card.nid),
+                        "deck_name": deck.get("name") if deck else None,
+                        "queue": CARD_QUEUE_NAMES.get(card.queue, str(card.queue)),
+                        "type": CARD_TYPE_NAMES.get(card.type, str(card.type)),
+                        "due": card.due,
+                        "interval_days": card.ivl,
+                        "reps": card.reps,
+                        "lapses": card.lapses,
+                    }
+                )
+            except (AnkiError, NotFoundError, KeyError):
+                continue
+        return results
+
+    def summary_fn(data: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "query": query,
+            "total_matches": len(data),
+            "sample_card_ids": [r["card_id"] for r in data[:5]],
+        }
+
+    return execute_tool(
+        operation="search_cards",
+        action=action,
+        output_file=output_file,
+        summary_fn=summary_fn,
+    )
+
+
+# ============================================================================
+# Statistics & Media / Export Utilities
+# ============================================================================
+
+
+@server.tool()
+def get_collection_stats(output_file: str | None = None) -> dict[str, Any]:
+    """Get collection statistics (total notes, cards, new/due cards, deck breakdown)."""
+
+    def action(col: Collection, _: Any) -> dict[str, Any]:
+        decks_breakdown = [
+            {
+                "id": entry.id,
+                "name": entry.name,
+                "cards": col.decks.card_count(
+                    dids=DeckId(entry.id), include_subdecks=True
+                ),
+            }
+            for entry in col.decks.all_names_and_ids()
+        ]
+        db = col.db
+        if db is None:
+            raise RuntimeError("Database connection not available")
+        return {
+            "total_notes": db.scalar("select count() from notes"),
+            "total_cards": db.scalar("select count() from cards"),
+            "new_cards": len(col.find_cards("is:new")),
+            "due_cards": len(col.find_cards("is:due")),
+            "decks": decks_breakdown,
+        }
+
+    def summary_fn(data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "total_notes": data["total_notes"],
+            "total_cards": data["total_cards"],
+            "new_cards": data["new_cards"],
+            "due_cards": data["due_cards"],
+            "deck_count": len(data["decks"]),
+        }
+
+    return execute_tool(
+        operation="get_collection_stats",
+        action=action,
+        output_file=output_file,
+        summary_fn=summary_fn,
+    )
 
 
 @server.tool()
@@ -351,648 +694,6 @@ def store_media_file(
                 "html_embed": f'<img src="{stored_name}">',
                 "markdown_embed": f"![{stored_name}]({stored_name})",
             },
-        )
-
-
-# ============================================================================
-# Card State Control Tools
-# ============================================================================
-
-
-@server.tool()
-def suspend_cards(
-    card_ids: list[int] | None = None,
-    note_ids: list[int] | None = None,
-    query: str | None = None,
-    input_file: str | None = None,
-    output_file: str | None = None,
-) -> dict[str, Any]:
-    """Suspend cards from active review queues by card IDs, note IDs, search query, or input file."""
-    with get_collection() as col:
-        cids = _resolve_card_ids(
-            col,
-            card_ids=card_ids,
-            note_ids=note_ids,
-            query=query,
-            input_file=input_file,
-        )
-        col.sched.suspend_cards(cids)
-        return make_response(
-            operation="suspend_cards",
-            payload={
-                "status": "success",
-                "cards_suspended": len(cids),
-                "card_ids": [int(c) for c in cids],
-            },
-            summary={
-                "cards_suspended": len(cids),
-                "sample_card_ids": [int(c) for c in cids[:5]],
-            },
-            output_file=output_file,
-        )
-
-
-@server.tool()
-def unsuspend_cards(
-    card_ids: list[int] | None = None,
-    note_ids: list[int] | None = None,
-    query: str | None = None,
-    input_file: str | None = None,
-    output_file: str | None = None,
-) -> dict[str, Any]:
-    """Unsuspend cards back into active review queues by card IDs, note IDs, search query, or input file."""
-    with get_collection() as col:
-        cids = _resolve_card_ids(
-            col,
-            card_ids=card_ids,
-            note_ids=note_ids,
-            query=query,
-            input_file=input_file,
-        )
-        col.sched.unsuspend_cards(cids)
-        return make_response(
-            operation="unsuspend_cards",
-            payload={
-                "status": "success",
-                "cards_unsuspended": len(cids),
-                "card_ids": [int(c) for c in cids],
-            },
-            summary={
-                "cards_unsuspended": len(cids),
-                "sample_card_ids": [int(c) for c in cids[:5]],
-            },
-            output_file=output_file,
-        )
-
-
-# ============================================================================
-# Notetype (Model) Tools
-# ============================================================================
-
-
-@server.tool()
-def list_notetypes(output_file: str | None = None) -> dict[str, Any]:
-    """List all available notetypes (models) in the collection, their fields, and types."""
-    with get_collection() as col:
-
-        def _format_nt(entry: Any) -> dict[str, Any]:
-            model = col.models.get(entry.id)
-            fields = col.models.field_names(model) if model else []
-            is_cloze = (model.get("type") == 1) if model else False
-            return {
-                "id": entry.id,
-                "name": entry.name,
-                "fields": fields,
-                "type": "cloze" if is_cloze else "standard",
-            }
-
-        notetypes = [_format_nt(entry) for entry in col.models.all_names_and_ids()]
-        return make_response(
-            operation="list_notetypes",
-            payload=notetypes,
-            summary={
-                "notetype_count": len(notetypes),
-                "notetype_names": [nt["name"] for nt in notetypes],
-            },
-            output_file=output_file,
-        )
-
-
-@server.tool()
-def get_notetype_info(
-    notetype_name: str, output_file: str | None = None
-) -> dict[str, Any]:
-    """Get detailed schema information about a specific notetype."""
-    with get_collection() as col:
-        model = col.models.by_name(notetype_name)
-        if not model:
-            raise ValueError(f"Notetype '{notetype_name}' not found.")
-
-        payload = {
-            "id": model["id"],
-            "name": model["name"],
-            "fields": col.models.field_names(model),
-            "templates": [t.get("name", "") for t in model.get("tmpls", [])],
-            "css": model.get("css", ""),
-            "type": "cloze" if model.get("type") == 1 else "standard",
-        }
-        return make_response(
-            operation="get_notetype_info",
-            payload=payload,
-            summary={
-                "id": model["id"],
-                "name": model["name"],
-                "fields": payload["fields"],
-                "templates": payload["templates"],
-                "type": payload["type"],
-            },
-            prefix=f"notetype_{notetype_name}",
-            output_file=output_file,
-        )
-
-
-# ============================================================================
-# Card & Note Creation Tools (Strict File-Based)
-# ============================================================================
-
-
-@server.tool()
-def add_note(
-    input_file: str,
-    deck_name: str | None = None,
-    output_file: str | None = None,
-) -> dict[str, Any]:
-    """Create a new flashcard note from a JSON file payload."""
-    data = read_json_file(input_file)
-    if not isinstance(data, dict):
-        raise TypeError(f"Input file '{input_file}' must contain a JSON object.")
-
-    with get_collection() as col:
-        req, suspended = _build_note(col, data, default_deck=deck_name)
-        col.add_note(req.note, req.deck_id)
-
-        card_ids = list(req.note.card_ids())
-        if suspended and card_ids:
-            col.sched.suspend_cards(card_ids)
-
-        deck = col.decks.get(req.deck_id)
-        deck_title = deck["name"] if deck else str(req.deck_id)
-
-        return make_response(
-            operation="add_note",
-            payload={
-                "status": "success",
-                "note_id": req.note.id,
-                "deck_name": deck_title,
-                "deck_id": req.deck_id,
-                "notetype_name": req.note.note_type()["name"],
-                "tags": list(req.note.tags),
-                "fields": dict(req.note.items()),
-                "cards_generated": len(card_ids),
-                "card_ids": card_ids,
-                "suspended": suspended,
-            },
-            summary={
-                "note_id": req.note.id,
-                "deck_name": deck_title,
-                "card_ids": card_ids,
-                "tags": list(req.note.tags),
-                "suspended": suspended,
-            },
-            prefix=f"add_note_{req.note.id}",
-            output_file=output_file,
-        )
-
-
-@server.tool()
-def add_cloze_note(
-    input_file: str,
-    deck_name: str | None = None,
-    output_file: str | None = None,
-) -> dict[str, Any]:
-    """Create a Cloze deletion flashcard (fill-in-the-blank style) from a JSON file payload."""
-    data = read_json_file(input_file)
-    if not isinstance(data, dict):
-        raise TypeError(f"Input file '{input_file}' must contain a JSON object.")
-
-    data.setdefault("notetype_name", "Cloze")
-    data["is_cloze"] = True
-
-    with get_collection() as col:
-        req, suspended = _build_note(col, data, default_deck=deck_name)
-        col.add_note(req.note, req.deck_id)
-
-        card_ids = list(req.note.card_ids())
-        if suspended and card_ids:
-            col.sched.suspend_cards(card_ids)
-
-        deck = col.decks.get(req.deck_id)
-        deck_title = deck["name"] if deck else str(req.deck_id)
-
-        return make_response(
-            operation="add_cloze_note",
-            payload={
-                "status": "success",
-                "note_id": req.note.id,
-                "deck_name": deck_title,
-                "deck_id": req.deck_id,
-                "tags": list(req.note.tags),
-                "fields": dict(req.note.items()),
-                "cards_generated": len(card_ids),
-                "card_ids": card_ids,
-                "suspended": suspended,
-            },
-            summary={
-                "note_id": req.note.id,
-                "deck_name": deck_title,
-                "card_ids": card_ids,
-                "tags": list(req.note.tags),
-                "suspended": suspended,
-            },
-            prefix=f"add_cloze_note_{req.note.id}",
-            output_file=output_file,
-        )
-
-
-@server.tool()
-def add_notes_batch(
-    input_file: str,
-    output_file: str | None = None,
-) -> dict[str, Any]:
-    """Add multiple flashcard notes in a single high-throughput batch operation from a JSON file."""
-    raw = read_json_file(input_file)
-    if isinstance(raw, dict):
-        notes_list = raw.get("notes") or raw.get("cards")
-        if not isinstance(notes_list, list):
-            raise TypeError(
-                f"JSON object in '{input_file}' must contain a 'notes' list."
-            )
-        default_deck = raw.get("deck_name") or raw.get("deck")
-        default_suspended = bool(raw.get("suspended", False))
-    elif isinstance(raw, list):
-        notes_list = raw
-        default_deck = None
-        default_suspended = False
-    else:
-        raise TypeError(
-            f"Input file '{input_file}' must contain a JSON array or object with 'notes'."
-        )
-
-    with get_collection() as col:
-        requests: list[AddNoteRequest] = []
-        suspensions: list[bool] = []
-
-        for item in notes_list:
-            req, suspended = _build_note(
-                col,
-                item,
-                default_deck=default_deck,
-                default_suspended=default_suspended,
-            )
-            requests.append(req)
-            suspensions.append(suspended)
-
-        col.add_notes(requests)
-
-        cards_to_suspend: list[CardId] = []
-        for req, should_suspend in zip(requests, suspensions):
-            if should_suspend:
-                cards_to_suspend.extend(req.note.card_ids())
-
-        if cards_to_suspend:
-            col.sched.suspend_cards(cards_to_suspend)
-
-        created = [
-            {
-                "note_id": req.note.id,
-                "deck_id": req.deck_id,
-                "tags": list(req.note.tags),
-                "fields": dict(req.note.items()),
-                "cards_generated": len(req.note.cards()),
-                "card_ids": list(req.note.card_ids()),
-            }
-            for req in requests
-        ]
-
-        return make_response(
-            operation="add_notes_batch",
-            payload={
-                "status": "success",
-                "total_created": len(created),
-                "notes": created,
-            },
-            summary={
-                "total_created": len(created),
-                "total_cards": sum(n["cards_generated"] for n in created),
-                "sample_note_ids": [n["note_id"] for n in created[:5]],
-            },
-            prefix="add_notes_batch",
-            output_file=output_file,
-        )
-
-
-# ============================================================================
-# Note Inspection & Update Tools
-# ============================================================================
-
-
-@server.tool()
-def get_note(note_id: int, output_file: str | None = None) -> dict[str, Any]:
-    """Retrieve complete information about a note by its ID."""
-    with get_collection() as col:
-        note = col.get_note(NoteId(note_id))
-        cards = note.cards()
-        deck = col.decks.get(cards[0].did) if cards else None
-        deck_name = deck.get("name") if deck else None
-
-        payload = {
-            "note_id": note.id,
-            "guid": note.guid,
-            "notetype_id": note.mid,
-            "deck_name": deck_name,
-            "tags": list(note.tags),
-            "fields": dict(note.items()),
-            "card_ids": list(note.card_ids()),
-            "cards_count": len(cards),
-            "modified_time": note.mod,
-        }
-        return make_response(
-            operation="get_note",
-            payload=payload,
-            summary={
-                "note_id": note.id,
-                "deck_name": deck_name,
-                "notetype_id": note.mid,
-                "tags": list(note.tags),
-                "field_names": list(note.keys()),
-                "cards_count": len(cards),
-            },
-            prefix=f"get_note_{note.id}",
-            output_file=output_file,
-        )
-
-
-@server.tool()
-def update_note(
-    note_id: int,
-    input_file: str,
-    output_file: str | None = None,
-) -> dict[str, Any]:
-    """Update fields and/or tags of an existing note from a JSON file."""
-    data = read_json_file(input_file)
-    if not isinstance(data, dict):
-        raise TypeError(f"Input file '{input_file}' must contain a JSON object.")
-
-    fields = data.get("fields")
-    tags = data.get("tags")
-
-    with get_collection() as col:
-        note = col.get_note(NoteId(note_id))
-
-        if fields:
-            for field_name, value in fields.items():
-                if field_name in note:
-                    note[field_name] = value
-                else:
-                    raise ValueError(
-                        f"Field '{field_name}' not found on note {note_id}."
-                    )
-
-        if tags is not None:
-            note.tags = list(tags)
-
-        col.update_note(note)
-
-        return make_response(
-            operation="update_note",
-            payload={
-                "status": "success",
-                "note_id": note.id,
-                "tags": list(note.tags),
-                "fields": dict(note.items()),
-            },
-            summary={
-                "note_id": note.id,
-                "updated_fields": list(fields.keys()) if fields else [],
-                "tags": list(note.tags),
-            },
-            prefix=f"update_note_{note.id}",
-            output_file=output_file,
-        )
-
-
-@server.tool()
-def delete_notes(
-    note_ids: list[int] | None = None,
-    input_file: str | None = None,
-    output_file: str | None = None,
-) -> dict[str, Any]:
-    """Delete notes (and all cards generated from them) by their Note IDs or from a JSON file list."""
-    nids = _resolve_note_ids(note_ids=note_ids, input_file=input_file)
-
-    with get_collection() as col:
-        col.remove_notes(nids)
-        return make_response(
-            operation="delete_notes",
-            payload={
-                "status": "success",
-                "deleted_count": len(nids),
-                "deleted_note_ids": [int(nid) for nid in nids],
-            },
-            summary={
-                "deleted_count": len(nids),
-                "sample_deleted_ids": [int(nid) for nid in nids[:5]],
-            },
-            output_file=output_file,
-        )
-
-
-# ============================================================================
-# Search Tools
-# ============================================================================
-
-
-@server.tool()
-def search_notes(
-    query: str, limit: int = 500, output_file: str | None = None
-) -> dict[str, Any]:
-    """Search notes using Anki browser syntax, writing full matched cards/fields to disk."""
-    with get_collection() as col:
-        note_ids = col.find_notes(query)[:limit]
-        results = []
-        for nid in note_ids:
-            try:
-                note = col.get_note(nid)
-                cards = note.cards()
-                deck = col.decks.get(cards[0].did) if cards else None
-                results.append(
-                    {
-                        "note_id": note.id,
-                        "deck_name": deck.get("name") if deck else None,
-                        "tags": list(note.tags),
-                        "fields": dict(note.items()),
-                    }
-                )
-            except (AnkiError, NotFoundError, KeyError):
-                continue
-
-        return make_response(
-            operation="search_notes",
-            payload=results,
-            summary={
-                "query": query,
-                "total_matches": len(results),
-                "sample_note_ids": [r["note_id"] for r in results[:5]],
-            },
-            output_file=output_file,
-        )
-
-
-@server.tool()
-def search_cards(
-    query: str, limit: int = 500, output_file: str | None = None
-) -> dict[str, Any]:
-    """Search cards using Anki browser syntax, returning card queue status, due dates, and intervals to disk."""
-    with get_collection() as col:
-        card_ids = col.find_cards(query)[:limit]
-        results = []
-        for cid in card_ids:
-            try:
-                card = col.get_card(CardId(cid))
-                deck = col.decks.get(card.did)
-                results.append(
-                    {
-                        "card_id": card.id,
-                        "note_id": card.nid,
-                        "deck_name": deck.get("name") if deck else None,
-                        "queue": CARD_QUEUE_NAMES.get(card.queue, str(card.queue)),
-                        "type": CARD_TYPE_NAMES.get(card.type, str(card.type)),
-                        "due": card.due,
-                        "interval_days": card.ivl,
-                        "reps": card.reps,
-                        "lapses": card.lapses,
-                    }
-                )
-            except (AnkiError, NotFoundError, KeyError):
-                continue
-
-        return make_response(
-            operation="search_cards",
-            payload=results,
-            summary={
-                "query": query,
-                "total_matches": len(results),
-                "sample_card_ids": [r["card_id"] for r in results[:5]],
-            },
-            output_file=output_file,
-        )
-
-
-# ============================================================================
-# Tag Management Tools
-# ============================================================================
-
-
-@server.tool()
-def list_tags(output_file: str | None = None) -> dict[str, Any]:
-    """List all unique tags across the collection, writing full tag array to disk."""
-    with get_collection() as col:
-        all_tags = col.tags.all()
-        return make_response(
-            operation="list_tags",
-            payload=all_tags,
-            summary={
-                "tag_count": len(all_tags),
-                "sample_tags": all_tags[:10],
-            },
-            output_file=output_file,
-        )
-
-
-@server.tool()
-def add_tags_to_notes(
-    note_ids: list[int] | None = None,
-    tags: list[str] | None = None,
-    input_file: str | None = None,
-    output_file: str | None = None,
-) -> dict[str, Any]:
-    """Add one or more tags in bulk to notes from argument lists or a JSON file."""
-    if input_file and tags is None:
-        file_data = read_json_file(input_file)
-        if isinstance(file_data, dict):
-            tags = file_data.get("tags")
-
-    nids = _resolve_note_ids(note_ids=note_ids, input_file=input_file)
-    if not tags:
-        raise ValueError("Must provide 'tags' directly or in 'input_file'.")
-
-    with get_collection() as col:
-        col.tags.bulk_add(nids, " ".join(tags))
-        return make_response(
-            operation="add_tags_to_notes",
-            payload={
-                "status": "success",
-                "notes_affected": len(nids),
-                "note_ids": [int(nid) for nid in nids],
-                "tags_added": tags,
-            },
-            summary={
-                "notes_affected": len(nids),
-                "tags_added": tags,
-            },
-            output_file=output_file,
-        )
-
-
-@server.tool()
-def remove_tags_from_notes(
-    note_ids: list[int] | None = None,
-    tags: list[str] | None = None,
-    input_file: str | None = None,
-    output_file: str | None = None,
-) -> dict[str, Any]:
-    """Remove one or more tags in bulk from notes from argument lists or a JSON file."""
-    if input_file and tags is None:
-        file_data = read_json_file(input_file)
-        if isinstance(file_data, dict):
-            tags = file_data.get("tags")
-
-    nids = _resolve_note_ids(note_ids=note_ids, input_file=input_file)
-    if not tags:
-        raise ValueError("Must provide 'tags' directly or in 'input_file'.")
-
-    with get_collection() as col:
-        col.tags.bulk_remove(nids, " ".join(tags))
-        return make_response(
-            operation="remove_tags_from_notes",
-            payload={
-                "status": "success",
-                "notes_affected": len(nids),
-                "note_ids": [int(nid) for nid in nids],
-                "tags_removed": tags,
-            },
-            summary={
-                "notes_affected": len(nids),
-                "tags_removed": tags,
-            },
-            output_file=output_file,
-        )
-
-
-# ============================================================================
-# Statistics & Export Tools
-# ============================================================================
-
-
-@server.tool()
-def get_collection_stats(output_file: str | None = None) -> dict[str, Any]:
-    """Get collection statistics (total notes, cards, new/due cards, deck breakdown)."""
-    with get_collection() as col:
-        decks_breakdown = [
-            {
-                "id": entry.id,
-                "name": entry.name,
-                "cards": col.decks.card_count(dids=entry.id, include_subdecks=True),
-            }
-            for entry in col.decks.all_names_and_ids()
-        ]
-        return make_response(
-            operation="get_collection_stats",
-            payload={
-                "total_notes": col.db.scalar("select count() from notes"),
-                "total_cards": col.db.scalar("select count() from cards"),
-                "new_cards": len(col.find_cards("is:new")),
-                "due_cards": len(col.find_cards("is:due")),
-                "decks": decks_breakdown,
-            },
-            summary={
-                "total_notes": col.db.scalar("select count() from notes"),
-                "total_cards": col.db.scalar("select count() from cards"),
-                "new_cards": len(col.find_cards("is:new")),
-                "due_cards": len(col.find_cards("is:due")),
-                "deck_count": len(decks_breakdown),
-            },
-            output_file=output_file,
         )
 
 
@@ -1072,7 +773,7 @@ def get_decks_resource() -> str:
                 "id": entry.id,
                 "name": entry.name,
                 "card_count": col.decks.card_count(
-                    dids=entry.id, include_subdecks=True
+                    dids=DeckId(entry.id), include_subdecks=True
                 ),
             }
             for entry in col.decks.all_names_and_ids()
@@ -1084,9 +785,12 @@ def get_decks_resource() -> str:
 def get_stats_resource() -> str:
     """Resource returning collection overview and due statistics as JSON."""
     with get_collection() as col:
+        db = col.db
+        if db is None:
+            raise RuntimeError("Database connection not available")
         stats = {
-            "total_notes": col.db.scalar("select count() from notes"),
-            "total_cards": col.db.scalar("select count() from cards"),
+            "total_notes": db.scalar("select count() from notes"),
+            "total_cards": db.scalar("select count() from cards"),
             "new_cards": len(col.find_cards("is:new")),
             "due_cards": len(col.find_cards("is:due")),
         }
@@ -1119,5 +823,5 @@ Guidelines:
 5. Apply relevant hierarchical tags:
    - `topic::{topic.lower().replace(" ", "-")}`
    - `difficulty::{difficulty.lower()}`
-6. Save your card payload to a temporary JSON file before calling `add_note(input_file=...)`.
+6. Save your card payload to a temporary JSON file before calling `add_notes(input_file=...)`.
 """
