@@ -1,0 +1,10 @@
+{
+  "fields": {
+    "Back": "<p>Average case: $\\mathcal{O}(n \\log n)$, Worst case: $\\mathcal{O}(n^2)$ when pivots are extremal.</p>"
+  },
+  "tags": [
+    "algorithms",
+    "sorting",
+    "reviewed_2026"
+  ]
+}

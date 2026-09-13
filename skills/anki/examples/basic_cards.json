@@ -1,0 +1,38 @@
+[
+  {
+    "deck_name": "CS::Algorithms",
+    "notetype_name": "Basic",
+    "fields": {
+      "Front": "[Algorithms] What is the average-case time complexity of QuickSort?",
+      "Back": "<p>Average case: $\\mathcal{O}(n \\log n)$</p>"
+    },
+    "tags": [
+      "algorithms",
+      "sorting"
+    ]
+  },
+  {
+    "deck_name": "CS::Algorithms",
+    "notetype_name": "Basic",
+    "fields": {
+      "Front": "[Algorithms] Under what pivot selection condition does QuickSort degrade to its worst-case time complexity $\\mathcal{O}(n^2)$?",
+      "Back": "<p>When the pivot consistently partitions the array into size $0$ and $n-1$ (e.g., choosing the first or last element on already sorted data).</p>"
+    },
+    "tags": [
+      "algorithms",
+      "sorting"
+    ]
+  },
+  {
+    "deck_name": "CS::Concurrency",
+    "notetype_name": "Basic",
+    "fields": {
+      "Front": "[OS] What are the 4 Coffman conditions required for deadlock to occur?",
+      "Back": "<ol><li>Mutual Exclusion</li><li>Hold and Wait</li><li>No Preemption</li><li>Circular Wait</li></ol>"
+    },
+    "tags": [
+      "os",
+      "concurrency"
+    ]
+  }
+]

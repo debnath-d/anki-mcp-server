@@ -1,12 +1,10 @@
 [project]
 name = "anki-mcp-server"
-version = "0.2.0"
+version = "0.3.0"
 description = "Model Context Protocol (MCP) server for managing Anki flashcards, decks, notetypes, tags, and media"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [
-    { name = "D. Debnath", email = "d_debnath@outlook.com" }
-]
+authors = [{ name = "D. Debnath", email = "d_debnath@outlook.com" }]
 keywords = [
     "anki",
     "mcp",
@@ -32,10 +30,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Education",
 ]
-dependencies = [
-    "anki>=26.8.1",
-    "mcp[cli]>=2.0.0",
-]
+dependencies = ["anki>=26.8.1", "mcp[cli]>=2.0.0"]
 
 [project.scripts]
 anki-mcp-server = "anki_mcp_server:main"

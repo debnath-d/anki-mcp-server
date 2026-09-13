@@ -1,0 +1,22 @@
+[
+  {
+    "deck_name": "CS::Python",
+    "is_cloze": true,
+    "text": "In Python, {{c1::copy.copy()}} performs a shallow copy, whereas {{c2::copy.deepcopy()}} recursively duplicates all nested objects.",
+    "extra": "<p>Contained in the standard library <code>copy</code> module.</p>",
+    "tags": [
+      "python",
+      "memory"
+    ]
+  },
+  {
+    "deck_name": "CS::Networking",
+    "is_cloze": true,
+    "text": "During the TCP 3-way handshake, the client sends {{c1::SYN}}, the server replies with {{c2::SYN-ACK}}, and the client acknowledges with {{c3::ACK}}.",
+    "extra": "<p>Establishes sequence numbers and connection state.</p>",
+    "tags": [
+      "networking",
+      "tcp"
+    ]
+  }
+]

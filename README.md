@@ -129,6 +129,90 @@ claude --mcp-server "uv --directory '/path/to/anki-mcp-server' run anki-mcp-serv
 
 ---
 
+## 🧠 Bundled Anki Agent Skill
+
+This repository includes a production-ready **Agent Skill** ([`skills/anki`](skills/anki)) designed for AI coding assistants and agents (such as Google Antigravity, Claude Code, and other agents supporting the Agent Skills standard).
+
+While the MCP server provides the *mechanism* (tools, file-based I/O, database access), the agent skill provides the *policy* and *methodology* (spaced-repetition knowledge formulation, card authoring heuristics, and multi-step runbooks).
+
+### What the Skill Provides
+
+* **Evolutionary Card Lifecycle:** Rejects rigid academic dogma that forces complete pre-comprehension. Cards can start directly in Anki as rich problem statements (e.g. 150 NeetCode problems) or reading excerpts, evolving into atomic cards as you study.
+* **Token-Efficient Ingestion:** Guides agents to assemble bulk payloads via scripts directly in the OS temporary directory (`tempfile.gettempdir() / 'anki_mcp'`) without burning LLM context tokens analyzing each card upfront.
+* **Pragmatic Knowledge Formulation:** Operationalized rules distilled from SuperMemo:
+  * Atomicity (Minimum Information Principle) as an evolutionary target during review/refactoring.
+  * Pragmatic allowances for small sets (2–4 items) and short sequences.
+  * Contrastive pairing for confusable concepts to combat memory interference.
+  * Context prefixes (e.g. `[Python]`, `[NeetCode]`) and hierarchical tags.
+  * Strict formatting for LaTeX (`$...$`, `$$...$$`) and code blocks (`<pre><code>...</code></pre>`).
+* **Execution Playbooks:** Step-by-step runbooks for bulk script ingestion, interactive generation, leech triage (`prop:lapses>=4`), and deck restructuring.
+* **Query Cheatsheet:** Quick reference for Anki search syntax (`is:due`, `prop:lapses`, `tag:`, `deck:`).
+
+### Installing the Skill
+
+The skill adheres to the open Agent Skills standard and can be linked globally or per-project across your preferred agent environments:
+
+#### 1. Claude Code
+
+* **Global Install:**
+  * **Linux / macOS:**
+    ```bash
+    mkdir -p ~/.claude/skills
+    ln -s "$(pwd)/skills/anki" ~/.claude/skills/anki
+    ```
+  * **Windows (PowerShell):**
+    ```powershell
+    New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\skills"
+    New-Item -ItemType SymbolicLink -Path "$env:USERPROFILE\.claude\skills\anki" -Target "$PWD\skills\anki"
+    ```
+* **Project-Specific Install:**
+  Link or copy directly into your repository's `.claude/skills/`:
+  ```bash
+  mkdir -p .claude/skills
+  ln -s "$(pwd)/skills/anki" .claude/skills/anki
+  ```
+
+#### 2. Google Antigravity
+
+* **Global Install:**
+  * **Linux / macOS:**
+    ```bash
+    mkdir -p ~/.gemini/config/skills
+    ln -s "$(pwd)/skills/anki" ~/.gemini/config/skills/anki
+    ```
+  * **Windows (PowerShell):**
+    ```powershell
+    New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.gemini\config\skills"
+    New-Item -ItemType SymbolicLink -Path "$env:USERPROFILE\.gemini\config\skills\anki" -Target "$PWD\skills\anki"
+    ```
+* **Project-Specific Install:**
+  Link into `.agents/skills/`:
+  ```bash
+  mkdir -p .agents/skills
+  ln -s "$(pwd)/skills/anki" .agents/skills/anki
+  ```
+
+#### 3. Universal `.agents/skills` (Cursor, Codex, OpenHands)
+
+* **Global Install:**
+  * **Linux / macOS:**
+    ```bash
+    mkdir -p ~/.agents/skills
+    ln -s "$(pwd)/skills/anki" ~/.agents/skills/anki
+    ```
+  * **Windows (PowerShell):**
+    ```powershell
+    New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.agents\skills"
+    New-Item -ItemType SymbolicLink -Path "$env:USERPROFILE\.agents\skills\anki" -Target "$PWD\skills\anki"
+    ```
+* **Project-Specific Install:**
+  ```bash
+  mkdir -p .agents/skills
+  ln -s "$(pwd)/skills/anki" .agents/skills/anki
+  ```
+
+---
+
 ## Available MCP Tools
 
 ### 1. Deck Management

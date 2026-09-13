@@ -22,9 +22,20 @@ from anki_mcp_server.notes import ingest_notes
 from anki_mcp_server.pipeline import execute_tool
 from anki_mcp_server.selector import TargetSpec
 
+INSTRUCTIONS_PATH = Path(__file__).parent / "instructions.md"
+DEFAULT_INSTRUCTIONS = (
+    "Universal File-Based I/O MCP Server for managing Anki flashcards, decks, "
+    "notetypes, tags, media, and search."
+)
+INSTRUCTIONS = (
+    INSTRUCTIONS_PATH.read_text(encoding="utf-8")
+    if INSTRUCTIONS_PATH.is_file()
+    else DEFAULT_INSTRUCTIONS
+)
+
 server = MCPServer(
     name="anki-mcp-server",
-    instructions="Universal File-Based I/O MCP Server for managing Anki flashcards, decks, notetypes, tags, media, and search.",
+    instructions=INSTRUCTIONS,
     version="0.3.0",
 )
 

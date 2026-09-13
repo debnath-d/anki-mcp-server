@@ -157,6 +157,13 @@ class TestAnkiMcpServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    def test_mcp_instructions(self):
+        self.assertIsNotNone(server.instructions)
+        assert server.instructions is not None
+        self.assertIn("Universal File-Based I/O", server.instructions)
+        self.assertIn("add_notes", server.instructions)
+        self.assertIn("input_file", server.instructions)
+
     def test_deck_management_and_rename(self):
         create_res = create_deck(self.test_deck)
         self.assertEqual(create_res["status"], "success")
