@@ -68,7 +68,7 @@ def _build_note_request(
 
     note = col.new_note(notetype)
     fields = data.get("fields")
-    is_model_cloze = notetype.get("type") == 1
+    is_notetype_cloze = notetype.get("type") == 1
 
     if fields:
         for f_name, f_val in fields.items():
@@ -79,7 +79,7 @@ def _build_note_request(
                     f"Field '{f_name}' does not exist on notetype '{notetype['name']}'. "
                     f"Available fields: {col.models.field_names(notetype)}"
                 )
-    elif is_model_cloze or is_cloze:
+    elif is_notetype_cloze or is_cloze:
         text = data.get("text") or data.get("front", "")
         if not text:
             raise ValueError(

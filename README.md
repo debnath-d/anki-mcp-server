@@ -152,7 +152,7 @@ claude --mcp-server "uv --directory '/path/to/anki-mcp-server' run anki-mcp-serv
 
 | Tool | Parameters | Description |
 |------|------------|-------------|
-| `add_notes` | `input_file: str`, `deck_name?: str`, `output_file?: str` | Ingests one or more flashcard notes (single note, cloze deletion, or batch array) atomically from a JSON payload. |
+| `add_notes` | `input_file: str`, `deck_name?: str`, `output_file?: str` | Ingests one or more notes (single note, cloze deletion, or batch array) atomically from a JSON payload. |
 | `get_note` | `note_id: int`, `output_file?: str` | Fetches a note by ID with fields, tags, notetype, and cards to disk. |
 | `update_note` | `note_id: int`, `input_file: str`, `output_file?: str` | Updates fields or tags on an existing note from a JSON payload. |
 | `delete_notes` | `note_ids?: list[int]`, `input_file?: str`, `output_file?: str` | Deletes notes and their cards by ID list or JSON file. |

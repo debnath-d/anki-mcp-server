@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from anki.cards import CardId
 from anki.collection import Collection
@@ -13,7 +13,7 @@ from anki_mcp_server.io_utils import read_json_file
 
 @dataclass
 class TargetSpec:
-    """Polymorphic specification for targeting flashcard entities."""
+    """Polymorphic specification for targeting card and note entities."""
 
     card_ids: list[int] | None = None
     note_ids: list[int] | None = None
@@ -27,18 +27,28 @@ class TargetSpec:
             self._cached_payload = read_json_file(self.input_file)
         return self._cached_payload
 
+    def _populate_from_file(
+        self, default_list_target: Literal["card_ids", "note_ids"]
+    ) -> None:
+        """Hydrate criteria fields from input_file if present and not already specified."""
+        if not self.input_file:
+            return
+        file_data = self.get_file_payload()
+        if isinstance(file_data, dict):
+            self.card_ids = self.card_ids or file_data.get("card_ids")
+            self.note_ids = self.note_ids or file_data.get("note_ids")
+            self.query = self.query or file_data.get("query")
+        elif isinstance(file_data, list):
+            if default_list_target == "card_ids":
+                self.card_ids = self.card_ids or file_data
+            elif default_list_target == "note_ids":
+                self.note_ids = self.note_ids or file_data
+
     def resolve_card_ids(self, col: Collection) -> list[CardId]:
         """Extract and validate a deduplicated list of CardIds."""
         target_cids: set[int] = set()
 
-        if self.input_file:
-            file_data = self.get_file_payload()
-            if isinstance(file_data, dict):
-                self.card_ids = self.card_ids or file_data.get("card_ids")
-                self.note_ids = self.note_ids or file_data.get("note_ids")
-                self.query = self.query or file_data.get("query")
-            elif isinstance(file_data, list):
-                self.card_ids = self.card_ids or file_data
+        self._populate_from_file(default_list_target="card_ids")
 
         if self.card_ids:
             target_cids.update(self.card_ids)
@@ -63,14 +73,7 @@ class TargetSpec:
         """Extract and validate a deduplicated list of NoteIds."""
         target_nids: set[int] = set()
 
-        if self.input_file:
-            file_data = self.get_file_payload()
-            if isinstance(file_data, list):
-                self.note_ids = self.note_ids or file_data
-            elif isinstance(file_data, dict):
-                self.note_ids = self.note_ids or file_data.get("note_ids")
-                self.card_ids = self.card_ids or file_data.get("card_ids")
-                self.query = self.query or file_data.get("query")
+        self._populate_from_file(default_list_target="note_ids")
 
         if self.note_ids:
             target_nids.update(self.note_ids)

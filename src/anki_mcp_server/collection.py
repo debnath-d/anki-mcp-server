@@ -107,6 +107,31 @@ class CollectionAdapter(Protocol):
         ...
 
 
+@contextmanager
+def _open_collection_session(
+    col_path: Path, *, is_isolated: bool = False
+) -> Generator[Collection, None, None]:
+    """Scoped Anki Collection lifecycle wrapper with unified exception handling and cleanup."""
+    try:
+        col = Collection(str(col_path))
+    except DBError as e:
+        if is_isolated:
+            raise RuntimeError(f"Isolated collection at '{col_path}' is locked.") from e
+        raise RuntimeError(
+            f"Anki collection at '{col_path}' is currently locked. "
+            "The Anki desktop application appears to be open or media is syncing. "
+            "Please close the Anki desktop app and retry."
+        ) from e
+    except AnkiError as e:
+        desc = "isolated collection" if is_isolated else "Anki collection"
+        raise RuntimeError(f"Failed to open {desc}: {e}") from e
+
+    try:
+        yield col
+    finally:
+        col.close()
+
+
 class NativeAnkiAdapter:
     """Production adapter interacting directly with an on-disk Anki SQLite collection."""
 
@@ -123,21 +148,8 @@ class NativeAnkiAdapter:
         if not col_path.exists():
             raise FileNotFoundError(f"Anki collection file not found at: {col_path}")
 
-        try:
-            col = Collection(str(col_path))
-        except DBError as e:
-            raise RuntimeError(
-                f"Anki collection database at '{col_path}' is currently locked. "
-                "The Anki desktop application appears to be open or media is syncing. "
-                "Please close the Anki desktop app and retry."
-            ) from e
-        except AnkiError as e:
-            raise RuntimeError(f"Failed to open Anki collection: {e}") from e
-
-        try:
+        with _open_collection_session(col_path, is_isolated=False) as col:
             yield col
-        finally:
-            col.close()
 
 
 class IsolatedAnkiAdapter:
@@ -194,19 +206,8 @@ class IsolatedAnkiAdapter:
             self.setup()
         assert self._col_path is not None
 
-        try:
-            col = Collection(str(self._col_path))
-        except DBError as e:
-            raise RuntimeError(
-                f"Isolated collection database at '{self._col_path}' is locked."
-            ) from e
-        except AnkiError as e:
-            raise RuntimeError(f"Failed to open isolated collection: {e}") from e
-
-        try:
+        with _open_collection_session(self._col_path, is_isolated=True) as col:
             yield col
-        finally:
-            col.close()
 
 
 _current_adapter: CollectionAdapter = NativeAnkiAdapter()

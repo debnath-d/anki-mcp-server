@@ -22,15 +22,13 @@ def _project_summary(data: Any) -> dict[str, Any]:
         first = data[0]
         if isinstance(first, dict):
             if "note_id" in first:
-                summary["sample_note_ids"] = [item["note_id"] for item in sample]
+                summary["sample_note_ids"] = [n["note_id"] for n in sample]
             elif "card_id" in first:
-                summary["sample_card_ids"] = [item["card_id"] for item in sample]
-            elif "name" in first:
-                summary["sample_names"] = [item["name"] for item in sample]
-            elif "id" in first:
-                summary["sample_ids"] = [item["id"] for item in sample]
-        elif isinstance(first, (int, str)):
-            summary["sample_items"] = sample
+                summary["sample_card_ids"] = [c["card_id"] for c in sample]
+        elif isinstance(first, int):
+            summary["sample_ids"] = sample
+        elif isinstance(first, str):
+            summary["sample_values"] = sample
 
         return summary
 

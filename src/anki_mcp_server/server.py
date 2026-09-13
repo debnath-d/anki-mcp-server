@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+CardState = Literal["suspended", "active"]
+TagAction = Literal["add", "remove"]
 
 import anki.collection  # noqa: F401 - Required before other anki imports in Python 3.14
 from anki.cards import CardId
@@ -285,7 +288,7 @@ def add_notes(
     deck_name: str | None = None,
     output_file: str | None = None,
 ) -> dict[str, Any]:
-    """Ingest one or more flashcard notes (single note, cloze deletion, or batch array) from a JSON file."""
+    """Ingest one or more notes (single note, cloze deletion, or batch array) from a JSON file."""
 
     def action(col: Collection, payload: Any) -> list[dict[str, Any]]:
         ingested = ingest_notes(col, payload, default_deck=deck_name)
@@ -421,7 +424,7 @@ def delete_notes(
 
 @server.tool()
 def set_card_state(
-    state: str = "suspended",
+    state: CardState = "suspended",
     card_ids: list[int] | None = None,
     note_ids: list[int] | None = None,
     query: str | None = None,
@@ -463,7 +466,7 @@ def set_card_state(
 
 @server.tool()
 def update_note_tags(
-    action: str = "add",
+    action: TagAction = "add",
     tags: list[str] | None = None,
     note_ids: list[int] | None = None,
     input_file: str | None = None,

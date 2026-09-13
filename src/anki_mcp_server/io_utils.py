@@ -95,4 +95,3 @@ def make_response(
         output_file=out_path,
         status=status,
     )
-
